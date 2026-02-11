@@ -56,7 +56,7 @@ class CallkitNotificationService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action === CallkitConstants.ACTION_CALL_START) {
+        if (intent?.action == CallkitConstants.ACTION_CALL_START) {
             intent.getBundleExtra(CallkitConstants.EXTRA_CALLKIT_INCOMING_DATA)
                 ?.let {
                     if(it.getBoolean(CallkitConstants.EXTRA_CALLKIT_CALLING_SHOW, true)) {
@@ -67,11 +67,12 @@ class CallkitNotificationService : Service() {
                     }
                 }
         }
-        if (intent?.action === CallkitConstants.ACTION_CALL_ACCEPT) {
+        if (intent?.action == CallkitConstants.ACTION_CALL_ACCEPT) {
             intent.getBundleExtra(CallkitConstants.EXTRA_CALLKIT_INCOMING_DATA)
                 ?.let {
                     getCallkitNotificationManager()?.clearIncomingNotification(it, true)
                     if (it.getBoolean(CallkitConstants.EXTRA_CALLKIT_CALLING_SHOW, true)) {
+                        getCallkitNotificationManager()?.createNotificationChanel(it)
                         showOngoingCallNotification(it)
                     }else {
                         stopSelf()
