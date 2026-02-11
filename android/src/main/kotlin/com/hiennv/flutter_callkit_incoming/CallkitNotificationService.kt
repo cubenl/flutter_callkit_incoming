@@ -91,7 +91,7 @@ class CallkitNotificationService : Service() {
                 startForeground(
                     callkitNotification.id,
                     callkitNotification.notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 )
             } else {
                 startForeground(callkitNotification.id, callkitNotification.notification)

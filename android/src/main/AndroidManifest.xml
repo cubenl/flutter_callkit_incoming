@@ -59,7 +59,7 @@
         <service
             android:enabled="true"
             android:exported="true"
-            android:foregroundServiceType="phoneCall"
+            android:foregroundServiceType="phoneCall|microphone"
             android:permission="${applicationId}.PERMISSION_CALL"
             android:name="com.hiennv.flutter_callkit_incoming.CallkitNotificationService">
         </service>
