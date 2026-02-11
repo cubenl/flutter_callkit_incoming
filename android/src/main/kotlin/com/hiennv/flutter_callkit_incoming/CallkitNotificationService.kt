@@ -86,7 +86,7 @@ class CallkitNotificationService : Service() {
                     getCallkitNotificationManager()?.clearIncomingNotification(it, true)
                     if (it.getBoolean(CallkitConstants.EXTRA_CALLKIT_CALLING_SHOW, true)) {
                         getCallkitNotificationManager()?.createNotificationChanel(it)
-                        showOngoingCallNotification(it)
+                        showOngoingCallNotification(it, true)
                     }else {
                         stopSelf()
                     }
@@ -96,10 +96,10 @@ class CallkitNotificationService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun showOngoingCallNotification(bundle: Bundle) {
+    private fun showOngoingCallNotification(bundle: Bundle, isConnected: Boolean = false) {
 
         val callkitNotification =
-            getCallkitNotificationManager()?.getOnGoingCallNotification(bundle, false)
+            getCallkitNotificationManager()?.getOnGoingCallNotification(bundle, isConnected)
         if (callkitNotification != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
