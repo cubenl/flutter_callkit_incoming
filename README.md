@@ -1,4 +1,40 @@
-# Flutter Callkit Incoming
+# Flutter Callkit Incoming (Cube fork)
+
+Fork of [`hiennguyen92/flutter_callkit_incoming`](https://github.com/hiennguyen92/flutter_callkit_incoming) with Android foreground service fixes. All changes are Android-only.
+
+## Fork changes
+
+### Why this fork exists
+
+The upstream plugin has three issues with Android foreground service handling that cause audio loss and stuck notifications in VoIP apps:
+
+**1. Missing microphone foreground service type (Android 14+)**
+
+Android 14+ requires foreground services to declare all service types they use. The upstream plugin only declares `phoneCall`, but VoIP calls also need `microphone`. Without it, the system kills microphone access when the app goes to background, dropping call audio.
+
+**2. Broken string comparison in service handler**
+
+The `CallkitNotificationService.onStartCommand` used Kotlin's `===` (referential equality) instead of `==` (structural equality) to compare intent action strings. When Android serializes intents through PendingIntents (e.g. the accept button on a notification), the action string becomes a different object. This caused the `ACTION_CALL_ACCEPT` handler to silently fail, leaving the incoming call notification visible after accepting.
+
+**3. No foreground service for Flutter-initiated call accept**
+
+There are two ways to accept an incoming call: via the native notification (fires `ACTION_CALL_ACCEPT` → starts foreground service) or via the Flutter UI (calls `setCallConnected()` → fires `ACTION_CALL_CONNECTED`). The upstream plugin only starts the foreground service for the first path. When accepting from the Flutter UI, no foreground service was started, causing audio to drop in the background. The `ACTION_CALL_CONNECTED` handler also didn't show the connected notification with a call timer.
+
+### Changed files
+
+| File | Change |
+|---|---|
+| `AndroidManifest.xml` | Added `FOREGROUND_SERVICE_MICROPHONE` permission, added `microphone` to service's `foregroundServiceType` |
+| `CallkitNotificationService.kt` | `===` → `==` for intent action comparison |
+| `CallkitNotificationService.kt` | Added `createNotificationChanel()` call in `ACTION_CALL_ACCEPT` handler |
+| `CallkitNotificationService.kt` | Added `ACTION_CALL_CONNECTED` to `ActionForeground` list + handler in `onStartCommand` |
+| `CallkitNotificationService.kt` | `showOngoingCallNotification` accepts `isConnected` param, passes `true` for CONNECTED |
+| `CallkitNotificationService.kt` | `startForeground()` uses `PHONE_CALL or MICROPHONE` types |
+| `CallkitIncomingBroadcastReceiver.kt` | `ACTION_CALL_CONNECTED` starts foreground service instead of showing a regular notification |
+
+---
+
+## Original README
 
 A Flutter plugin to show incoming call in your Flutter app (Custom for Android/Callkit for iOS).
 
