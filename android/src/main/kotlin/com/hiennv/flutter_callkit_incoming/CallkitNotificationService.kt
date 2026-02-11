@@ -16,7 +16,8 @@ class CallkitNotificationService : Service() {
 
         private val ActionForeground = listOf(
             CallkitConstants.ACTION_CALL_START,
-            CallkitConstants.ACTION_CALL_ACCEPT
+            CallkitConstants.ACTION_CALL_ACCEPT,
+            CallkitConstants.ACTION_CALL_CONNECTED
         )
 
 
@@ -68,6 +69,18 @@ class CallkitNotificationService : Service() {
                 }
         }
         if (intent?.action == CallkitConstants.ACTION_CALL_ACCEPT) {
+            intent.getBundleExtra(CallkitConstants.EXTRA_CALLKIT_INCOMING_DATA)
+                ?.let {
+                    getCallkitNotificationManager()?.clearIncomingNotification(it, true)
+                    if (it.getBoolean(CallkitConstants.EXTRA_CALLKIT_CALLING_SHOW, true)) {
+                        getCallkitNotificationManager()?.createNotificationChanel(it)
+                        showOngoingCallNotification(it)
+                    }else {
+                        stopSelf()
+                    }
+                }
+        }
+        if (intent?.action == CallkitConstants.ACTION_CALL_CONNECTED) {
             intent.getBundleExtra(CallkitConstants.EXTRA_CALLKIT_INCOMING_DATA)
                 ?.let {
                     getCallkitNotificationManager()?.clearIncomingNotification(it, true)

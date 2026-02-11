@@ -175,8 +175,15 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_CONNECTED}" -> {
                 try {
-                    // update notification on going connected
-                    getCallkitNotificationManager()?.showOngoingCallNotification(data, true)
+                    // Start the foreground service with ongoing notification.
+                    // This handles both accept paths:
+                    // - Native callkit accept: service already running, this updates it (idempotent)
+                    // - Flutter UI accept: no service yet, this starts it with the ongoing notification
+                    CallkitNotificationService.startServiceWithAction(
+                        context,
+                        CallkitConstants.ACTION_CALL_CONNECTED,
+                        data
+                    )
                     sendEventFlutter(CallkitConstants.ACTION_CALL_CONNECTED, data)
                 } catch (error: Exception) {
                     Log.e(TAG, null, error)
