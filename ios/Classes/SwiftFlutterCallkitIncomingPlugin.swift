@@ -175,17 +175,12 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
             result(true)
             break
         case "callConnected":
-            guard let args = call.arguments else {
+            guard call.arguments != nil else {
                 result(true)
                 return
             }
-            if(self.isFromPushKit){
-                self.connectedCall(self.data!)
-            }else{
-                if let getArgs = args as? [String: Any] {
-                    self.data = Data(args: getArgs)
-                    self.connectedCall(self.data!)
-                }
+            if let data = self.data {
+                self.connectedCall(data)
             }
             result(true)
             break
