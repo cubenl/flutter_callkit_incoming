@@ -117,6 +117,13 @@ class FlutterCallkitIncoming {
     return await _channel.invokeMethod("getDevicePushTokenVoIP");
   }
 
+  /// Set speaker output directly via AVAudioSession (iOS only).
+  /// Bypasses RTCAudioSession to avoid persistent overrides that
+  /// prevent CallKit from toggling speaker back off.
+  static Future<bool> setSpeaker(bool enabled) async {
+    return await _channel.invokeMethod<bool>("setSpeaker", enabled) ?? false;
+  }
+
   /// Silence CallKit events
   static Future silenceEvents() async {
     return await _channel.invokeMethod("silenceEvents", true);

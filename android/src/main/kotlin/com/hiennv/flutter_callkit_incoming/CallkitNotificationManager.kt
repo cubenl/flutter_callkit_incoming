@@ -39,7 +39,7 @@ class CallkitNotificationManager(
 
         const val EXTRA_TIME_START_CALL = "EXTRA_TIME_START_CALL"
 
-        const val NOTIFICATION_CHANNEL_ID_INCOMING = "callkit_incoming_channel_id"
+        const val NOTIFICATION_CHANNEL_ID_INCOMING = "callkit_incoming_channel_id_v2"
         const val NOTIFICATION_CHANNEL_ID_ONGOING = "callkit_ongoing_channel_id"
         const val NOTIFICATION_CHANNEL_ID_MISSED = "callkit_missed_channel_id"
 
@@ -173,7 +173,8 @@ class CallkitNotificationManager(
 
         notificationBuilder = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID_INCOMING)
         notificationBuilder?.setChannelId(NOTIFICATION_CHANNEL_ID_INCOMING)
-        notificationBuilder?.setDefaults(NotificationCompat.DEFAULT_VIBRATE)
+        notificationBuilder?.setDefaults(0)
+        notificationBuilder?.setVibrate(longArrayOf(0))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             notificationBuilder?.setCategory(NotificationCompat.CATEGORY_CALL)
             notificationBuilder?.priority = NotificationCompat.PRIORITY_MAX
@@ -897,10 +898,10 @@ class CallkitNotificationManager(
                         NotificationManager.IMPORTANCE_HIGH
                     ).apply {
                         description = ""
-                        vibrationPattern = longArrayOf(0, 1000, 500, 1000, 500)
+                        vibrationPattern = longArrayOf(0)
                         lightColor = Color.RED
                         enableLights(true)
-                        enableVibration(true)
+                        enableVibration(false)
                         setSound(null, null)
                     }
                 }
@@ -993,13 +994,13 @@ class CallkitNotificationManager(
     @SuppressLint("MissingPermission")
     fun showIncomingNotification(data: Bundle) {
         val callkitNotification = getIncomingNotification(data)
-        if (incomingChannelEnabled()) {
-            callkitSoundPlayerManager?.play(data)
-        }
         callkitNotification?.let {
             getNotificationManager().notify(
                 it.id, callkitNotification.notification
             )
+        }
+        if (incomingChannelEnabled()) {
+            callkitSoundPlayerManager?.play(data)
         }
     }
 

@@ -87,11 +87,16 @@ class CallkitSoundPlayerManager(private val context: Context) {
 
             else -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val audioAttrs = AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .build()
                     vibrator?.vibrate(
                         VibrationEffect.createWaveform(
                             longArrayOf(0L, 1000L, 1000L),
                             0
-                        )
+                        ),
+                        audioAttrs
                     )
                 } else {
                     vibrator?.vibrate(longArrayOf(0L, 1000L, 1000L), 0)

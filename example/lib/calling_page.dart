@@ -47,7 +47,6 @@ class CallingPageState extends State<CallingPage> {
     return result;
   }
 
-
   @override
   Widget build(BuildContext context) {
     final params = jsonDecode(jsonEncode(
@@ -102,7 +101,6 @@ class CallingPageState extends State<CallingPage> {
       ),
     );
   }
-
 
   Future<void> makeFakeConnectedCall(id) async {
     await FlutterCallkitIncoming.setCallConnected(id);

@@ -1,12 +1,14 @@
 # Flutter Callkit Incoming (Cube fork)
 
-Fork of [`hiennguyen92/flutter_callkit_incoming`](https://github.com/hiennguyen92/flutter_callkit_incoming) with Android foreground service fixes. All changes are Android-only.
+Fork of [`hiennguyen92/flutter_callkit_incoming`](https://github.com/hiennguyen92/flutter_callkit_incoming) with Android foreground service fixes and iOS speaker management for WebRTC VoIP apps.
 
 ## Fork changes
 
 ### Why this fork exists
 
-The upstream plugin has two issues with Android foreground service handling that cause audio loss and missing call notifications in VoIP apps:
+The upstream plugin has issues with Android foreground service handling, Android vibration behavior, and lacks iOS speaker control needed for WebRTC VoIP apps that bypass RTCAudioSession.
+
+### Android: Foreground service fixes
 
 **1. Missing microphone foreground service type (Android 14+)**
 
@@ -16,7 +18,35 @@ Android 14+ requires foreground services to declare all service types they use. 
 
 There are two ways to accept an incoming call: via the native notification (fires `ACTION_CALL_ACCEPT` → starts foreground service) or via the Flutter UI (calls `setCallConnected()` → fires `ACTION_CALL_CONNECTED`). The upstream plugin only starts the foreground service for the first path. When accepting from the Flutter UI, no foreground service was started, causing audio to drop in the background. The `ACTION_CALL_CONNECTED` handler also didn't show the connected notification with a call timer.
 
+### Android: Continuous vibration in vibrate mode
+
+**3. Notification channel overrides programmatic vibration**
+
+When an incoming call notification is posted, the notification channel's one-shot vibration pattern (`[0, 1000, 500, 1000, 500]`) overrides the continuous vibration started by `CallkitSoundPlayerManager`. Combined with `DEFAULT_VIBRATE` on the notification builder, this results in only 1-2 short buzzes instead of continuous ringing vibration.
+
+**Fix:**
+- Disabled vibration on the incoming call notification channel (`enableVibration(false)`, `vibrationPattern = [0]`)
+- Removed `DEFAULT_VIBRATE` from notification builder, replaced with `setDefaults(0)` + `setVibrate([0])`
+- Bumped channel ID to `callkit_incoming_channel_id_v2` (Android channels are immutable after creation)
+- Reversed order in `showIncomingNotification()`: post notification first, then start vibration
+
+**4. Vibration filtered on Android 16+ (API 36)**
+
+Android 16 silently ignores `Vibrator.vibrate()` calls without `AudioAttributes` when in vibrate mode. Added `AudioAttributes` with `USAGE_NOTIFICATION_RINGTONE` to the vibrate call so Android treats it as a call-related vibration that should work in vibrate mode.
+
+### iOS: Speaker management for WebRTC
+
+WebRTC's `RTCAudioSession` maintains internal state and actively reverts external audio route changes. This prevents CallKit's native speaker toggle from working — toggling speaker ON via CallKit gets immediately reverted by RTCAudioSession. This fork adds:
+
+**1. Audio route change observer** — Detects speaker state changes from the CallKit native UI via `AVAudioSession.routeChangeNotification`. Fires `ACTION_CALL_TOGGLE_SPEAKER` events to Flutter with deduplication (only fires when state actually changes).
+
+**2. `setSpeaker` MethodChannel** — Allows Flutter to set speaker state directly via `AVAudioSession.overrideOutputAudioPort`, bypassing RTCAudioSession entirely.
+
+**3. Speaker reapply after call-switch** — During call-switch (Hold & Answer), CallKit fires `didDeactivate`/`didActivate` which resets the audio route. `reapplySpeakerIfNeeded()` restores the speaker override after the interruption notification settles.
+
 ### Changed files
+
+**Android:**
 
 | File | Change |
 |---|---|
@@ -26,6 +56,26 @@ There are two ways to accept an incoming call: via the native notification (fire
 | `CallkitNotificationService.kt` | `showOngoingCallNotification` accepts `isConnected` param, passes `true` for CONNECTED |
 | `CallkitNotificationService.kt` | `startForeground()` uses `PHONE_CALL or MICROPHONE` types |
 | `CallkitIncomingBroadcastReceiver.kt` | `ACTION_CALL_CONNECTED` starts foreground service instead of showing a regular notification |
+| `CallkitNotificationManager.kt` | Disabled vibration on incoming channel, removed `DEFAULT_VIBRATE` from builder, bumped channel ID to `_v2`, reversed notification/vibration order |
+| `CallkitSoundPlayerManager.kt` | Added `AudioAttributes` with `USAGE_NOTIFICATION_RINGTONE` to `vibrate()` call for Android 16+ compatibility |
+
+**iOS:**
+
+| File | Change |
+|---|---|
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `ACTION_CALL_TOGGLE_SPEAKER` constant and `lastKnownSpeakerState` property |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `startAudioRouteObserver()` / `stopAudioRouteObserver()` / `handleAudioRouteChange()` for native speaker detection |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `reapplySpeakerIfNeeded()` — restores speaker after `didActivate` during call-switch |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `setSpeaker` MethodChannel handler — direct `AVAudioSession.overrideOutputAudioPort` bypass |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Moved `startAudioRouteObserver()` + audio session event before early returns in `didActivate` |
+
+**Dart:**
+
+| File | Change |
+|---|---|
+| `lib/entities/call_event.dart` | Added `actionCallToggleSpeaker` to `Event` enum |
+| `lib/flutter_callkit_incoming.dart` | Added `setSpeaker(bool)` static method |
+| `analysis_options.yaml` | Added `example/**` exclude to fix pre-existing build errors |
 
 ---
 

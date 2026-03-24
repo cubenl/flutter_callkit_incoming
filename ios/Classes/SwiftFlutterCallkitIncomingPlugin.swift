@@ -24,7 +24,8 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     static let ACTION_CALL_TOGGLE_DMTF = "com.hiennv.flutter_callkit_incoming.ACTION_CALL_TOGGLE_DMTF"
     static let ACTION_CALL_TOGGLE_GROUP = "com.hiennv.flutter_callkit_incoming.ACTION_CALL_TOGGLE_GROUP"
     static let ACTION_CALL_TOGGLE_AUDIO_SESSION = "com.hiennv.flutter_callkit_incoming.ACTION_CALL_TOGGLE_AUDIO_SESSION"
-    
+    static let ACTION_CALL_TOGGLE_SPEAKER = "com.hiennv.flutter_callkit_incoming.ACTION_CALL_TOGGLE_SPEAKER"
+
     @objc public private(set) static var sharedInstance: SwiftFlutterCallkitIncomingPlugin!
     
     private var streamHandlers: WeakArray<EventCallbackHandler> = WeakArray([])
@@ -40,6 +41,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     private var isFromPushKit: Bool = false
     private var silenceEvents: Bool = false
     private let devicePushTokenVoIP = "DevicePushTokenVoIP"
+    private var lastKnownSpeakerState: Bool? = nil
 
     
     private func sendEvent(_ event: String, _ body: [String : Any?]?) {
@@ -54,6 +56,57 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         
     }
     
+    func startAudioRouteObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioRouteChange),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+        // Seed the initial state so the first real change fires correctly.
+        lastKnownSpeakerState = AVAudioSession.sharedInstance().currentRoute.outputs
+            .contains { $0.portType == .builtInSpeaker }
+    }
+
+    func stopAudioRouteObserver() {
+        NotificationCenter.default.removeObserver(
+            self,
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+        lastKnownSpeakerState = nil
+    }
+
+    @objc private func handleAudioRouteChange(_ notification: Notification) {
+        let session = AVAudioSession.sharedInstance()
+        let isSpeaker = session.currentRoute.outputs
+            .contains { $0.portType == .builtInSpeaker }
+
+        // Only fire when the state actually changed to prevent ping-pong.
+        guard isSpeaker != lastKnownSpeakerState else { return }
+        lastKnownSpeakerState = isSpeaker
+
+        self.sendEvent(
+            SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_TOGGLE_SPEAKER,
+            ["isSpeaker": isSpeaker]
+        )
+    }
+
+    /// Re-applies speaker override after didActivate settles.
+    /// During call-switch, sendDefaultAudioInterruptionNotificationToStartAudioResource()
+    /// resets the audio route. This restores the speaker override if it was previously on.
+    private func reapplySpeakerIfNeeded() {
+        guard lastKnownSpeakerState == true else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard self?.lastKnownSpeakerState == true else { return }
+            do {
+                try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+            } catch {
+                print("reapplySpeakerIfNeeded failed: \(error)")
+            }
+        }
+    }
+
     @objc public func sendEventCustom(_ event: String, body: NSDictionary?) {
         streamHandlers.reap().forEach { handler in
             handler?.send(event, body ?? [:])
@@ -199,9 +252,27 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
                 result(true)
                 return
             }
-            
+
             self.silenceEvents = silence
             result(true)
+            break;
+        case "setSpeaker":
+            guard let enabled = call.arguments as? Bool else {
+                result(false)
+                return
+            }
+            let session = AVAudioSession.sharedInstance()
+            do {
+                if enabled {
+                    try session.overrideOutputAudioPort(.speaker)
+                } else {
+                    try session.overrideOutputAudioPort(.none)
+                }
+                result(true)
+            } catch {
+                print("setSpeaker failed: \(error)")
+                result(false)
+            }
             break;
         case "requestNotificationPermission":
             guard let args = call.arguments else {
@@ -705,12 +776,20 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
             appDelegate.didActivateAudioSession(audioSession)
         }
 
+        // Always start the audio route observer and send the activation event,
+        // even for already-connected calls. Without this, speaker toggles from
+        // the CallKit UI are never detected.
+        startAudioRouteObserver()
+        self.sendEvent(SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_TOGGLE_AUDIO_SESSION, [ "isActivate": true ])
+
         if(self.answerCall?.hasConnected ?? false){
             sendDefaultAudioInterruptionNotificationToStartAudioResource()
+            reapplySpeakerIfNeeded()
             return
         }
         if(self.outgoingCall?.hasConnected ?? false){
             sendDefaultAudioInterruptionNotificationToStartAudioResource()
+            reapplySpeakerIfNeeded()
             return
         }
         self.outgoingCall?.startCall(withAudioSession: audioSession) {success in
@@ -726,8 +805,6 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         }
         sendDefaultAudioInterruptionNotificationToStartAudioResource()
         configureAudioSession()
-
-        self.sendEvent(SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_TOGGLE_AUDIO_SESSION, [ "isActivate": true ])
     }
     
     public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
@@ -741,6 +818,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
             return
         }
         
+        stopAudioRouteObserver()
         self.sendEvent(SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_TOGGLE_AUDIO_SESSION, [ "isActivate": false ])
     }
     
