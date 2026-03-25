@@ -36,13 +36,15 @@ Android 16 silently ignores `Vibrator.vibrate()` calls without `AudioAttributes`
 
 ### iOS: Speaker management for WebRTC
 
-WebRTC's `RTCAudioSession` maintains internal state and actively reverts external audio route changes. This prevents CallKit's native speaker toggle from working — toggling speaker ON via CallKit gets immediately reverted by RTCAudioSession. This fork adds:
+WebRTC's `RTCAudioSession` maintains internal state and actively reverts external audio route changes. This prevents CallKit's native speaker toggle from working — toggling speaker ON via CallKit gets immediately reverted by RTCAudioSession. This fork bypasses RTCAudioSession entirely and manages speaker state via `AVAudioSession.overrideOutputAudioPort` with a time-based protection window.
 
-**1. Audio route change observer** — Detects speaker state changes from the CallKit native UI via `AVAudioSession.routeChangeNotification`. Fires `ACTION_CALL_TOGGLE_SPEAKER` events to Flutter with deduplication (only fires when state actually changes).
+**1. Audio route change observer** — Detects speaker state changes via `AVAudioSession.routeChangeNotification`. Fires `ACTION_CALL_TOGGLE_SPEAKER` events to Flutter with deduplication (only fires when state actually changes). Includes a 2-second protection window: if speaker was set by the app and the route changes within 2s, it silently re-applies the override (catches WebRTC's internal `setCategory` calls). After 2s, route changes are assumed intentional (CallKit toggle, user action).
 
-**2. `setSpeaker` MethodChannel** — Allows Flutter to set speaker state directly via `AVAudioSession.overrideOutputAudioPort`, bypassing RTCAudioSession entirely.
+**2. `setSpeaker` / `reapplySpeaker` MethodChannels** — `setSpeaker` sets speaker state directly via `overrideOutputAudioPort` and starts the 2s protection window. `reapplySpeaker` does the same, used by the app after ADM restart to recover speaker state.
 
-**3. Speaker reapply after call-switch** — During call-switch (Hold & Answer), CallKit fires `didDeactivate`/`didActivate` which resets the audio route. `reapplySpeakerIfNeeded()` restores the speaker override after the interruption notification settles.
+**3. Speaker reapply after call-switch/unhold** — During call-switch (Hold & Answer), CallKit fires `didDeactivate`/`didActivate` which resets the audio route. `startAudioRouteObserver()` refreshes the protection window on `didActivate`, and `reapplySpeakerIfNeeded()` re-applies the override at 0.5s and 1.0s after activation (the second reapply ensures CallKit's native UI syncs).
+
+**4. `didDeactivate` early return for held calls** — When calls are on hold, `didDeactivate` returns early to preserve `lastKnownSpeakerState` and `lastSpeakerOnTime` across the audio session cycle.
 
 ### Changed files
 
@@ -63,18 +65,21 @@ WebRTC's `RTCAudioSession` maintains internal state and actively reverts externa
 
 | File | Change |
 |---|---|
-| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `ACTION_CALL_TOGGLE_SPEAKER` constant and `lastKnownSpeakerState` property |
-| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `startAudioRouteObserver()` / `stopAudioRouteObserver()` / `handleAudioRouteChange()` for native speaker detection |
-| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `reapplySpeakerIfNeeded()` — restores speaker after `didActivate` during call-switch |
-| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `setSpeaker` MethodChannel handler — direct `AVAudioSession.overrideOutputAudioPort` bypass |
-| `SwiftFlutterCallkitIncomingPlugin.swift` | Moved `startAudioRouteObserver()` + audio session event before early returns in `didActivate` |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `ACTION_CALL_TOGGLE_SPEAKER` constant |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `lastKnownSpeakerState` (dedup) and `lastSpeakerOnTime` (2s protection window) properties |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `startAudioRouteObserver()` / `stopAudioRouteObserver()` / `handleAudioRouteChange()` — native speaker detection with time-based auto-reapply |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `reapplySpeakerIfNeeded()` — restores speaker at 0.5s + 1.0s after `didActivate` for audio + CallKit UI sync |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `setSpeaker` MethodChannel — direct `overrideOutputAudioPort` + sets protection window |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | Added `reapplySpeaker` MethodChannel — same as `setSpeaker`, used for recovery after ADM restart |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | `didActivate`: early return for already-connected calls (skips interruption notification), calls `reapplySpeakerIfNeeded()` |
+| `SwiftFlutterCallkitIncomingPlugin.swift` | `didDeactivate`: early return when calls are on hold (preserves speaker state across session cycle) |
 
 **Dart:**
 
 | File | Change |
 |---|---|
 | `lib/entities/call_event.dart` | Added `actionCallToggleSpeaker` to `Event` enum |
-| `lib/flutter_callkit_incoming.dart` | Added `setSpeaker(bool)` static method |
+| `lib/flutter_callkit_incoming.dart` | Added `setSpeaker(bool)` and `reapplySpeaker(bool)` static methods |
 | `analysis_options.yaml` | Added `example/**` exclude to fix pre-existing build errors |
 
 ---

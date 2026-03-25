@@ -42,6 +42,11 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     private var silenceEvents: Bool = false
     private let devicePushTokenVoIP = "DevicePushTokenVoIP"
     private var lastKnownSpeakerState: Bool? = nil
+    /// When we last called overrideOutputAudioPort(.speaker). Used by
+    /// handleAudioRouteChange to only auto-reapply within a short window
+    /// after our own speaker set — after the window, route changes are
+    /// assumed intentional (CallKit toggle, user action).
+    private var lastSpeakerOnTime: Date? = nil
 
     
     private func sendEvent(_ event: String, _ body: [String : Any?]?) {
@@ -63,9 +68,20 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
             name: AVAudioSession.routeChangeNotification,
             object: nil
         )
-        // Seed the initial state so the first real change fires correctly.
-        lastKnownSpeakerState = AVAudioSession.sharedInstance().currentRoute.outputs
-            .contains { $0.portType == .builtInSpeaker }
+        // Seed the initial state only on the first call. During call-switch,
+        // didDeactivate returns early (calls on hold) so stopAudioRouteObserver
+        // is NOT called — lastKnownSpeakerState is preserved.
+        if lastKnownSpeakerState == nil {
+            lastKnownSpeakerState = AVAudioSession.sharedInstance().currentRoute.outputs
+                .contains { $0.portType == .builtInSpeaker }
+        }
+
+        // If speaker was on before this audio session cycle (call-switch, unhold),
+        // refresh the protection window so spurious speaker-off events from the
+        // session reconfiguration are silently re-applied instead of sent to Flutter.
+        if lastSpeakerOnTime != nil {
+            lastSpeakerOnTime = Date()
+        }
     }
 
     func stopAudioRouteObserver() {
@@ -75,6 +91,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
             object: nil
         )
         lastKnownSpeakerState = nil
+        lastSpeakerOnTime = nil
     }
 
     @objc private func handleAudioRouteChange(_ notification: Notification) {
@@ -82,9 +99,28 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         let isSpeaker = session.currentRoute.outputs
             .contains { $0.portType == .builtInSpeaker }
 
+        // If speaker was cleared within 2s of us setting it, silently re-apply.
+        // This catches WebRTC's internal setCategory calls (ADM restart,
+        // interruption notification response) that clear the transient override.
+        // After 2s the audio session is stable — any route change is intentional
+        // (CallKit toggle, user action) and should not be fought.
+        if !isSpeaker, let lastSet = lastSpeakerOnTime,
+           Date().timeIntervalSince(lastSet) < 2.0 {
+            try? session.overrideOutputAudioPort(.speaker)
+            return
+        }
+
         // Only fire when the state actually changed to prevent ping-pong.
         guard isSpeaker != lastKnownSpeakerState else { return }
         lastKnownSpeakerState = isSpeaker
+
+        // Track speaker-on from any source (app, CallKit, system) so the
+        // protection window in startAudioRouteObserver works for call-switch.
+        if isSpeaker {
+            lastSpeakerOnTime = Date()
+        } else {
+            lastSpeakerOnTime = nil
+        }
 
         self.sendEvent(
             SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_TOGGLE_SPEAKER,
@@ -92,17 +128,21 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         )
     }
 
-    /// Re-applies speaker override after didActivate settles.
-    /// During call-switch, sendDefaultAudioInterruptionNotificationToStartAudioResource()
-    /// resets the audio route. This restores the speaker override if it was previously on.
+    /// Re-applies speaker after didActivate during call-switch.
+    /// Uses a short delay to let the audio session settle after activation.
+    /// The route change observer handles subsequent WebRTC reconfigures.
     private func reapplySpeakerIfNeeded() {
-        guard lastKnownSpeakerState == true else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard self?.lastKnownSpeakerState == true else { return }
-            do {
-                try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
-            } catch {
-                print("reapplySpeakerIfNeeded failed: \(error)")
+        guard lastKnownSpeakerState == true || lastSpeakerOnTime != nil else { return }
+        // Re-apply at 0.5s and 1.0s after didActivate. The first catches fast
+        // WebRTC reconfigures, the second ensures CallKit's native UI picks up
+        // the speaker state (CallKit may cache the intermediate earpiece state
+        // from the didDeactivate/didActivate cycle and needs a fresh route
+        // change to refresh its speaker button).
+        for delay in [0.5, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard self?.lastSpeakerOnTime != nil else { return }
+                self?.lastSpeakerOnTime = Date()
+                try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
             }
         }
     }
@@ -261,16 +301,30 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
                 result(false)
                 return
             }
-            let session = AVAudioSession.sharedInstance()
             do {
-                if enabled {
-                    try session.overrideOutputAudioPort(.speaker)
-                } else {
-                    try session.overrideOutputAudioPort(.none)
-                }
+                let session = AVAudioSession.sharedInstance()
+                if enabled { lastSpeakerOnTime = Date() } else { lastSpeakerOnTime = nil }
+                try session.overrideOutputAudioPort(enabled ? .speaker : .none)
                 result(true)
             } catch {
                 print("setSpeaker failed: \(error)")
+                result(false)
+            }
+            break;
+        case "reapplySpeaker":
+            // Sets the speaker state and starts the 2s protection window.
+            // The route change observer auto-corrects within the window.
+            guard let enabled = call.arguments as? Bool else {
+                result(false)
+                return
+            }
+            do {
+                let session = AVAudioSession.sharedInstance()
+                if enabled { lastSpeakerOnTime = Date() } else { lastSpeakerOnTime = nil }
+                try session.overrideOutputAudioPort(enabled ? .speaker : .none)
+                result(true)
+            } catch {
+                print("reapplySpeaker failed: \(error)")
                 result(false)
             }
             break;
@@ -783,12 +837,14 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         self.sendEvent(SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_TOGGLE_AUDIO_SESSION, [ "isActivate": true ])
 
         if(self.answerCall?.hasConnected ?? false){
-            sendDefaultAudioInterruptionNotificationToStartAudioResource()
+            // Skip the interruption notification for already-connected calls (call-switch).
+            // RTCAudioSession listens for this notification and does a full audio session
+            // reconfiguration, which resets the speaker override. The Dart-side ADM restart
+            // (stopLocalRecording + startLocalRecording) handles audio recovery directly.
             reapplySpeakerIfNeeded()
             return
         }
         if(self.outgoingCall?.hasConnected ?? false){
-            sendDefaultAudioInterruptionNotificationToStartAudioResource()
             reapplySpeakerIfNeeded()
             return
         }

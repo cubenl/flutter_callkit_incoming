@@ -120,8 +120,16 @@ class FlutterCallkitIncoming {
   /// Set speaker output directly via AVAudioSession (iOS only).
   /// Bypasses RTCAudioSession to avoid persistent overrides that
   /// prevent CallKit from toggling speaker back off.
+  /// Uses transient overrideOutputAudioPort — ideal for interactive toggles.
   static Future<bool> setSpeaker(bool enabled) async {
     return await _channel.invokeMethod<bool>("setSpeaker", enabled) ?? false;
+  }
+
+  /// Persistent speaker recovery after ADM restart (iOS only).
+  /// Uses setCategory(.defaultToSpeaker) which survives subsequent
+  /// setCategory calls from WebRTC, unlike overrideOutputAudioPort.
+  static Future<bool> reapplySpeaker(bool enabled) async {
+    return await _channel.invokeMethod<bool>("reapplySpeaker", enabled) ?? false;
   }
 
   /// Silence CallKit events
