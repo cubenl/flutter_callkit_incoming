@@ -132,6 +132,43 @@ class FlutterCallkitIncoming {
     return await _channel.invokeMethod<bool>("reapplySpeaker", enabled) ?? false;
   }
 
+  /// Force WebRTC's VoiceProcessingIO audio unit rebuild via Mode toggle (iOS).
+  ///
+  /// Temporarily changes AVAudioSession.mode (e.g. voiceChat → default →
+  /// voiceChat). Different modes map to different native audio units
+  /// (VoiceProcessingIO vs RemoteIO), so the mode change forces iOS to
+  /// fully destroy and rebuild the audio unit. This is a DEEPER rebuild
+  /// than route-change tricks (setPreferredInput / overrideOutputAudioPort)
+  /// and is the native fix for stale playout after rapid back-to-back calls
+  /// where mic works but remote audio is silent.
+  ///
+  /// Safe during an active CallKit call. Doesn't change audio route (no
+  /// speaker activation). User may hear a brief gap (~150-300ms) during
+  /// the mode cycle.
+  ///
+  /// [settleMs] is the wait between toggle and restore. Default 200ms.
+  ///
+  /// Returns true if the mode cycle succeeded. On Android returns false.
+  static Future<bool> restartAudioSession({int settleMs = 200}) async {
+    return await _channel.invokeMethod<bool>(
+          "restartAudioSession",
+          {"settleMs": settleMs},
+        ) ??
+        false;
+  }
+
+  /// Deactivate the AVAudioSession after a call ends (iOS only).
+  ///
+  /// Forces CoreAudio to fully release the VoiceProcessingIO audio unit,
+  /// preventing cumulative stale state across rapid back-to-back calls.
+  /// Call AFTER CallKit has ended the call (removeCall completed) — if
+  /// called during an active call, iOS blocks it and returns false.
+  ///
+  /// Returns true if deactivation succeeded. On Android returns false.
+  static Future<bool> deactivateAudioSession() async {
+    return await _channel.invokeMethod<bool>("deactivateAudioSession") ?? false;
+  }
+
   /// Silence CallKit events
   static Future silenceEvents() async {
     return await _channel.invokeMethod("silenceEvents", true);

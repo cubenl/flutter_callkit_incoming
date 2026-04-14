@@ -27,6 +27,27 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     static let ACTION_CALL_TOGGLE_SPEAKER = "com.hiennv.flutter_callkit_incoming.ACTION_CALL_TOGGLE_SPEAKER"
 
     @objc public private(set) static var sharedInstance: SwiftFlutterCallkitIncomingPlugin!
+
+    /// Optional log forwarder. When set by the host app, plugin log lines
+    /// are delivered here (with source file:line) so they can be routed into
+    /// a unified app log (e.g. the Flutter session log). The plugin still
+    /// calls `print()` so the Xcode console keeps working unchanged.
+    ///
+    /// Signature: (message, sourceFile:line) — sourceFile:line points back
+    /// to the original `pluginLog(...)` call site inside the plugin.
+    @objc public static var logCallback: ((String, String) -> Void)?
+
+    /// Internal helper — use instead of `print()` when adding new logs.
+    /// Forwards to logCallback (with #file:#line) if set, and always
+    /// prints to stdout for Xcode console.
+    fileprivate static func pluginLog(_ message: String,
+                                      file: String = #file,
+                                      line: Int = #line) {
+        let filename = (file as NSString).lastPathComponent
+        let source = "\(filename):\(line)"
+        logCallback?(message, source)
+        print(message)
+    }
     
     private var streamHandlers: WeakArray<EventCallbackHandler> = WeakArray([])
     
@@ -47,6 +68,13 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     /// after our own speaker set — after the window, route changes are
     /// assumed intentional (CallKit toggle, user action).
     private var lastSpeakerOnTime: Date? = nil
+
+    /// Timestamp of the most recent AVAudioSessionRouteChangeNotification.
+    /// Used by `restartAudioSession` to wait for iOS to settle after a
+    /// post-toggle route reconfiguration storm before returning. Without
+    /// this wait, WebRTC's ADM startRecording can race with iOS still
+    /// reconfiguring routes, leaving playout (remote audio) wedged.
+    private var lastRouteChangeTime: Date? = nil
 
     
     private func sendEvent(_ event: String, _ body: [String : Any?]?) {
@@ -98,6 +126,12 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         let session = AVAudioSession.sharedInstance()
         let isSpeaker = session.currentRoute.outputs
             .contains { $0.portType == .builtInSpeaker }
+        let reasonRaw = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+        let outputs = session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
+        // Track every route change so restartAudioSession can wait for
+        // iOS to stop firing them before continuing the ADM restart.
+        lastRouteChangeTime = Date()
+        Self.pluginLog("[CallKit] handleAudioRouteChange: isSpeaker=\(isSpeaker), reason=\(reasonRaw), outputs=\(outputs)")
 
         // If speaker was cleared within 2s of us setting it, silently re-apply.
         // This catches WebRTC's internal setCategory calls (ADM restart,
@@ -106,6 +140,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         // (CallKit toggle, user action) and should not be fought.
         if !isSpeaker, let lastSet = lastSpeakerOnTime,
            Date().timeIntervalSince(lastSet) < 2.0 {
+            Self.pluginLog("[CallKit] handleAudioRouteChange: re-applying speaker (within 2s window)")
             try? session.overrideOutputAudioPort(.speaker)
             return
         }
@@ -126,6 +161,49 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
             SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_TOGGLE_SPEAKER,
             ["isSpeaker": isSpeaker]
         )
+    }
+
+    /// Polls `lastRouteChangeTime` until iOS has gone `quietPeriodMs`
+    /// without firing AVAudioSessionRouteChangeNotification, or the cap
+    /// `maxWaitMs` (since `startedAt`) is reached. Used after
+    /// restartAudioSession's mode toggle to let iOS finish its post-toggle
+    /// route-reconfiguration storm before the Dart-side ADM restart runs.
+    ///
+    /// The poll interval is 50ms — fast enough to add minimal latency,
+    /// slow enough to not burn CPU.
+    private func waitForRouteQuiescence(
+        startedAt: Date,
+        quietPeriodMs: Int,
+        maxWaitMs: Int,
+        completion: @escaping () -> Void
+    ) {
+        let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        if elapsedMs >= maxWaitMs {
+            Self.pluginLog("[CallKit] restartAudioSession: max wait (\(maxWaitMs)ms) reached, proceeding with possibly-still-firing storm")
+            completion()
+            return
+        }
+        let timeSinceLastChangeMs: Int
+        if let last = lastRouteChangeTime {
+            timeSinceLastChangeMs = Int(Date().timeIntervalSince(last) * 1000)
+        } else {
+            // No route changes seen yet — count the elapsed time as quiet.
+            timeSinceLastChangeMs = elapsedMs
+        }
+        if timeSinceLastChangeMs >= quietPeriodMs {
+            Self.pluginLog("[CallKit] restartAudioSession: route settled after \(elapsedMs)ms (quiet for \(timeSinceLastChangeMs)ms)")
+            completion()
+            return
+        }
+        // Still seeing route changes — poll again.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+            self?.waitForRouteQuiescence(
+                startedAt: startedAt,
+                quietPeriodMs: quietPeriodMs,
+                maxWaitMs: maxWaitMs,
+                completion: completion
+            )
+        }
     }
 
     /// Re-applies speaker after didActivate during call-switch.
@@ -307,7 +385,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
                 try session.overrideOutputAudioPort(enabled ? .speaker : .none)
                 result(true)
             } catch {
-                print("setSpeaker failed: \(error)")
+                Self.pluginLog("[CallKit] setSpeaker failed: \(error)")
                 result(false)
             }
             break;
@@ -324,7 +402,113 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
                 try session.overrideOutputAudioPort(enabled ? .speaker : .none)
                 result(true)
             } catch {
-                print("reapplySpeaker failed: \(error)")
+                Self.pluginLog("[CallKit] reapplySpeaker failed: \(error)")
+                result(false)
+            }
+            break;
+        case "restartAudioSession":
+            // Force WebRTC's VoiceProcessingIO audio unit to be fully
+            // destroyed and rebuilt via AVAudioSession.Mode change, then
+            // wait for iOS to finish reconfiguring routes before returning.
+            //
+            // Why setMode? Different modes map to different native audio units:
+            //   .voiceChat / .videoChat → VoiceProcessingIO (with AEC)
+            //   .default / .measurement → RemoteIO (no AEC)
+            // Switching mode forces iOS to tear down + rebuild the audio
+            // unit. This is a deeper rebuild than route-change tricks like
+            // overrideOutputAudioPort or setPreferredInput.
+            //
+            // Why wait for quiescence? After the mode toggle iOS fires a
+            // burst of routeConfigurationChange notifications (often 6+).
+            // If WebRTC's ADM startRecording runs DURING this burst, the
+            // ADM ends up bound to a stale session config — startRecording
+            // returns success but playout (remote audio) is silently dead.
+            // We poll the lastRouteChangeTime timestamp (updated by
+            // handleAudioRouteChange) and wait for `quietPeriodMs` of
+            // silence, capped at `maxWaitMs`, before returning success.
+            //
+            // Why not setActive(false)? iOS blocks it with error -12988
+            // during an active CallKit session.
+            //
+            // Why not overrideOutputAudioPort toggle? Briefly activates
+            // the speaker (visible/audible to user).
+            let session = AVAudioSession.sharedInstance()
+            let args = call.arguments as? [String: Any]
+            let settleMs = args?["settleMs"] as? Int ?? 200
+            let quietPeriodMs = args?["quietPeriodMs"] as? Int ?? 250
+            let maxWaitMs = args?["maxWaitMs"] as? Int ?? 1500
+            let originalMode = session.mode
+            let currentRoute = session.currentRoute.outputs.first?.portType.rawValue ?? "unknown"
+            Self.pluginLog("[CallKit] restartAudioSession: start, mode=\(originalMode.rawValue), route=\(currentRoute), quietMs=\(quietPeriodMs), maxMs=\(maxWaitMs)")
+
+            // Reset route-change timestamp so the quiescence detector
+            // doesn't see stale events from before this restart.
+            lastRouteChangeTime = nil
+
+            // Pick a toggle mode that differs from the current one.
+            // Avoid .measurement (disables AEC, can cause echo).
+            let toggleMode: AVAudioSession.Mode = (originalMode == .voiceChat || originalMode == .videoChat)
+                ? .default
+                : .voiceChat
+
+            do {
+                try session.setMode(toggleMode)
+                Self.pluginLog("[CallKit] restartAudioSession: toggled to \(toggleMode.rawValue)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(settleMs)) { [weak self] in
+                    guard let self = self else { result(false); return }
+                    do {
+                        try AVAudioSession.sharedInstance().setMode(originalMode)
+                        Self.pluginLog("[CallKit] restartAudioSession: restored to \(originalMode.rawValue)")
+                        // Now wait for iOS to stop firing route changes
+                        // before signalling success. The Dart-side ADM
+                        // restart sequence will then run against a settled
+                        // audio session.
+                        self.waitForRouteQuiescence(
+                            startedAt: Date(),
+                            quietPeriodMs: quietPeriodMs,
+                            maxWaitMs: maxWaitMs,
+                            completion: { result(true) }
+                        )
+                    } catch {
+                        Self.pluginLog("[CallKit] restartAudioSession mode restore failed: \(error)")
+                        result(FlutterError(code: "MODE_RESTORE_FAILED",
+                                            message: error.localizedDescription,
+                                            details: nil))
+                    }
+                }
+            } catch {
+                Self.pluginLog("[CallKit] restartAudioSession mode toggle failed: \(error)")
+                result(FlutterError(code: "MODE_TOGGLE_FAILED",
+                                    message: error.localizedDescription,
+                                    details: nil))
+            }
+            break;
+        case "deactivateAudioSession":
+            // Explicitly deactivate the AVAudioSession after a call ends.
+            //
+            // This is the ROOT CAUSE fix for the cumulative playout-dead bug:
+            // between rapid calls, the iOS audio session stays "active" with
+            // stale VoiceProcessingIO audio unit bindings. Each new call
+            // inherits that stale state, and after N calls the playout
+            // pipeline silently wedges.
+            //
+            // By deactivating between calls (when CallKit no longer owns the
+            // session), we force CoreAudio to fully release the audio unit.
+            // The next call's didActivate starts with a clean slate.
+            //
+            // MUST only be called AFTER CallKit has ended the call (otherwise
+            // setActive(false) fails with -12988). The Dart side calls this
+            // from clearCall() after removeAllStreams + CallKit removeCall.
+            let session = AVAudioSession.sharedInstance()
+            do {
+                try session.setActive(false, options: .notifyOthersOnDeactivation)
+                Self.pluginLog("[CallKit] deactivateAudioSession: success")
+                result(true)
+            } catch {
+                // Expected if another call is still active (multi-call) or
+                // if CallKit hasn't fully released yet. Not fatal — the next
+                // call will just inherit the existing session state.
+                Self.pluginLog("[CallKit] deactivateAudioSession: failed (expected if call still active): \(error)")
                 result(false)
             }
             break;
@@ -632,13 +816,15 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
                     .duckOthers,
                     .allowBluetooth,
                 ])
-                
-                try session.setMode(self.getAudioSessionMode(data?.audioSessionMode))
+
+                let mode = self.getAudioSessionMode(data?.audioSessionMode)
+                try session.setMode(mode)
                 try session.setActive(data?.audioSessionActive ?? true)
                 try session.setPreferredSampleRate(data?.audioSessionPreferredSampleRate ?? 44100.0)
                 try session.setPreferredIOBufferDuration(data?.audioSessionPreferredIOBufferDuration ?? 0.005)
+                Self.pluginLog("[CallKit] configureAudioSession: category=playAndRecord, mode=\(mode.rawValue)")
             }catch{
-                print(error)
+                Self.pluginLog("[CallKit] configureAudioSession failed: \(error)")
             }
         }
     }
@@ -825,6 +1011,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     }
     
     public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+        Self.pluginLog("[CallKit] didActivate audioSession (mode=\(audioSession.mode.rawValue), category=\(audioSession.category.rawValue))")
 
         if let appDelegate = UIApplication.shared.delegate as? CallkitIncomingAppDelegate {
             appDelegate.didActivateAudioSession(audioSession)
@@ -864,16 +1051,17 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     }
     
     public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-        
+        Self.pluginLog("[CallKit] didDeactivate audioSession")
+
         if let appDelegate = UIApplication.shared.delegate as? CallkitIncomingAppDelegate {
             appDelegate.didDeactivateAudioSession(audioSession)
         }
 
         if self.outgoingCall?.isOnHold ?? false || self.answerCall?.isOnHold ?? false{
-            print("Call is on hold")
+            Self.pluginLog("[CallKit] didDeactivate: skipped (call on hold)")
             return
         }
-        
+
         stopAudioRouteObserver()
         self.sendEvent(SwiftFlutterCallkitIncomingPlugin.ACTION_CALL_TOGGLE_AUDIO_SESSION, [ "isActivate": false ])
     }
